@@ -145,13 +145,18 @@
 </div>
 
 <div class="note">
-  <b>How it works:</b> two YOLOv8 models (COCO objects + a custom guns/knife detector)
-  run entirely in your browser via ONNX Runtime Web — no video ever leaves your device.
-  Threat rules: loitering ≥ 15 s → <b>LOW</b> · lingering near a vehicle ≥ 8 s or
-  entering the restricted zone → <b>MEDIUM</b> · weapon detected → <b>HIGH</b> ·
-  weapon persisting ≥ 5 s → <b>CRITICAL</b>. Alert history is stored locally in your
-  browser. Full edition (RTSP cameras, FastAPI backend, SQLite event log) runs locally —
-  see the GitHub repo.
+  <b>How it works:</b> three YOLOv8 models (a COCO context model + an ensemble of two
+  guns/knife detectors) run entirely in your browser via ONNX Runtime Web — no video
+  ever leaves your device. Weapon detections are cross-checked between the ensemble
+  models and against the COCO model (size, person overlap, everyday-object veto) and
+  must persist across several frames before alerting. Motion analysis flags possible
+  altercations and suspicious carried objects.
+  Threat rules: loitering ≥ 15 s → <b>LOW</b> · lingering near a vehicle ≥ 8 s,
+  restricted zone, or suspicious object → <b>MEDIUM</b> · weapon or possible
+  altercation → <b>HIGH</b> · weapon persisting ≥ 5 s → <b>CRITICAL</b>. Alert history
+  is stored locally in your browser. Full edition (RTSP cameras, FastAPI backend,
+  SQLite event log) runs locally — see the
+  <a href="https://github.com/KAN915A/ai-cctv-threat-detection" style="color:var(--accent)">GitHub repo</a>.
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.all.min.js"></script>

@@ -54,6 +54,7 @@ class ThreatClassifier:
     def __init__(self):
         self.weapon_window: deque = deque(maxlen=settings.weapon_window)
         self.weapon_first_seen: float | None = None
+        self.fight_window: deque = deque(maxlen=settings.fight_window)
 
     def classify(
         self,
@@ -96,6 +97,39 @@ class ThreatClassifier:
                     message=(f"{top.label.upper()} detected "
                              f"({top.confidence:.0%} confidence)"),
                     box=top.box,
+                ))
+
+        # --- Altercation: two people moving fast in close quarters (HIGH) ---
+        fighting_pair = None
+        track_list = list(tracks.values())
+        for i in range(len(track_list)):
+            for j in range(i + 1, len(track_list)):
+                a, b = track_list[i], track_list[j]
+                if (_boxes_near(a.box, b.box, margin=20)
+                        and a.speed() > settings.fight_speed_px
+                        and b.speed() > settings.fight_speed_px):
+                    fighting_pair = (a, b)
+        self.fight_window.append(fighting_pair is not None)
+        if (fighting_pair is not None
+                and sum(self.fight_window) >= settings.fight_votes):
+            a, b = fighting_pair
+            threats.append(Threat(
+                level="HIGH", kind="altercation",
+                message=(f"Rapid close-quarters movement between person "
+                         f"#{a.track_id} and #{b.track_id} — possible "
+                         f"altercation"),
+                box=a.box,
+            ))
+
+        # --- Dangerous object carried by a person (MEDIUM) -------------------
+        for d in detections:
+            if d.kind == "danger" and any(_boxes_near(d.box, p.box)
+                                          for p in persons):
+                threats.append(Threat(
+                    level="MEDIUM", kind="suspicious_object",
+                    message=(f"{d.label.capitalize()} "
+                             f"({d.confidence:.0%}) near a person"),
+                    box=d.box,
                 ))
 
         # --- Person near vehicle (MEDIUM) -----------------------------------

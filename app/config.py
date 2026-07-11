@@ -5,11 +5,14 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-WEAPON_MODEL_PATH = str(
-    BASE_DIR
-    / "Weapons-and-Knives-Detector-with-YOLOv8-main"
-    / "runs" / "detect" / "Normal" / "weights" / "best.pt"
-)
+# Weapons ensemble: the two strongest variants from the trained runs
+# (Normal mAP50 0.868, Normal_Compressed 0.860). A detection that both
+# models agree on is far more trustworthy than either alone.
+_RUNS = BASE_DIR / "Weapons-and-Knives-Detector-with-YOLOv8-main" / "runs" / "detect"
+WEAPON_MODEL_PATHS = [
+    str(_RUNS / "Normal" / "weights" / "best.pt"),
+    str(_RUNS / "Normal_Compressed" / "weights" / "best.pt"),
+]
 
 # COCO-pretrained model for people / vehicles / bags (downloads on first run)
 GENERAL_MODEL_PATH = "yolov8n.pt"
@@ -31,6 +34,10 @@ DISTRACTOR_CLASSES = {
     "teddy bear", "banana",
 }
 
+# COCO objects that aren't weapons but are worth a MEDIUM alert when
+# someone is carrying them
+DANGEROUS_OBJECTS = {"baseball bat", "scissors"}
+
 
 @dataclass
 class Settings:
@@ -41,12 +48,19 @@ class Settings:
     # Weapon fusion: candidates below these bars are rejected as noise.
     weapon_candidate_conf: float = 0.30   # raw model threshold (candidates)
     weapon_conf_near_person: float = 0.55  # weapon overlapping a person
+    weapon_conf_ensemble: float = 0.45     # both weapons models agree
     weapon_conf_agree: float = 0.40        # custom + COCO 'knife' agree
     weapon_conf_alone: float = 0.70        # no person anywhere near
     weapon_max_area_frac: float = 0.30     # bigger than this = misfire
     weapon_person_iou_veto: float = 0.50   # box ≈ person box = misfire
     distractor_iou: float = 0.40
     distractor_min_conf: float = 0.40
+    ensemble_iou: float = 0.55             # same-object match across models
+
+    # Altercation heuristic: two people moving fast in close quarters
+    fight_speed_px: float = 140.0          # px/s each person must exceed
+    fight_window: int = 6                  # frames in the vote window
+    fight_votes: int = 3                   # frames that must look like a fight
 
     # Threat rules (seconds)
     loiter_seconds: float = 15.0        # person mostly stationary this long -> LOW

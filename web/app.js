@@ -1,6 +1,7 @@
 /* AI CCTV Threat Monitor — browser edition.
- * Runs two YOLOv8 ONNX models client-side (ONNX Runtime Web), then applies
- * the same tracking + threat-classification rules as the Python backend.
+ * Runs three YOLOv8 ONNX models client-side (ONNX Runtime Web): a COCO
+ * context model plus an ensemble of two weapons models, then applies the
+ * same tracking + threat-classification rules as the Python backend.
  */
 
 'use strict';
@@ -14,19 +15,22 @@ const GENERAL_CONF = 0.40;
 const NMS_IOU = 0.45;
 
 // Weapon fusion: candidates are cross-checked against the COCO model and
-// scene geometry before they count (the raw weapons model false-positives
+// scene geometry before they count (the raw weapons models false-positive
 // on laptops, pens, screens, whole-room boxes).
 const WEAPON_CANDIDATE_CONF = 0.30;   // raw model threshold
 const WEAPON_CONF_NEAR_PERSON = 0.55; // weapon overlapping a person
+const WEAPON_CONF_ENSEMBLE = 0.45;    // both weapons models agree
 const WEAPON_CONF_AGREE = 0.40;       // custom + COCO 'knife' agree
 const WEAPON_CONF_ALONE = 0.70;       // no person anywhere near
 const WEAPON_MAX_AREA_FRAC = 0.30;    // bigger than this = misfire
 const WEAPON_PERSON_IOU_VETO = 0.50;  // box ≈ person box = misfire
 const DISTRACTOR_IOU = 0.40;
 const DISTRACTOR_MIN_CONF = 0.40;
+const ENSEMBLE_IOU = 0.55;            // same-object match across models
 const DISTRACTORS = new Set(['cell phone','remote','laptop','tv','keyboard',
   'mouse','book','bottle','cup','umbrella','toothbrush','hair drier','clock',
   'teddy bear','banana']);
+const DANGEROUS = new Set(['baseball bat', 'scissors']);
 
 const LOITER_SECONDS = 15;
 const LOITER_RADIUS = 90;            // px in model space
@@ -36,11 +40,16 @@ const VEHICLE_LURK_SECONDS = 8;
 const WEAPON_WINDOW = 8;
 const WEAPON_VOTES = 5;
 const WEAPON_CRITICAL_SECONDS = 5;
+// Altercation heuristic: two people moving fast in close quarters
+const FIGHT_SPEED_PX = 140;          // px/s each person must exceed
+const FIGHT_WINDOW = 6;
+const FIGHT_VOTES = 3;
 const ALERT_COOLDOWN_SECONDS = 30;
 
 const LEVELS = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
 const LEVEL_COLORS = { LOW: '#ffb40b', MEDIUM: '#ff7800', HIGH: '#e6383c', CRITICAL: '#c832c8' };
-const KIND_COLORS = { person: '#5ac85a', vehicle: '#3cb4e6', package: '#c8a078', weapon: '#e6383c' };
+const KIND_COLORS = { person: '#5ac85a', vehicle: '#3cb4e6', package: '#c8a078',
+                      weapon: '#e6383c', danger: '#ff8c00' };
 
 const COCO = ['person','bicycle','car','motorcycle','airplane','bus','train','truck','boat','traffic light','fire hydrant','stop sign','parking meter','bench','bird','cat','dog','horse','sheep','cow','elephant','bear','zebra','giraffe','backpack','umbrella','handbag','tie','suitcase','frisbee','skis','snowboard','sports ball','kite','baseball bat','baseball glove','skateboard','surfboard','tennis racket','bottle','wine glass','cup','fork','knife','spoon','bowl','banana','apple','sandwich','orange','broccoli','carrot','hot dog','pizza','donut','cake','chair','couch','potted plant','bed','dining table','toilet','tv','laptop','mouse','remote','keyboard','cell phone','microwave','oven','toaster','sink','refrigerator','book','clock','vase','scissors','teddy bear','hair drier','toothbrush'];
 const WEAPON_NAMES = ['guns', 'knife'];
@@ -53,6 +62,7 @@ function kindFor(label, fromWeaponModel) {
   if (label === 'person') return 'person';
   if (VEHICLES.has(label)) return 'vehicle';
   if (PACKAGES.has(label)) return 'package';
+  if (DANGEROUS.has(label)) return 'danger';
   return 'other';   // kept for weapon fusion (distractor veto), not displayed
 }
 
@@ -62,7 +72,7 @@ const canvas = $('canvas'), ctx = canvas.getContext('2d');
 const video = document.createElement('video');
 video.playsInline = true; video.muted = true;
 
-let sessions = null;      // { general, weapons }
+let sessions = null;      // { general, weapons: [s1, s2] }
 let running = false;
 let stream = null;
 let audioCtx = null, lastBeep = 0;
@@ -101,14 +111,18 @@ async function loadModels() {
   const report = () => {
     const parts = Object.entries(progress)
       .map(([n, p]) => `${n} ${(p * 100).toFixed(0)}%`).join(' · ');
-    ph.innerHTML = `Loading AI models (~24 MB, cached after first visit)…<br><small>${parts}</small>`;
+    ph.innerHTML = `Loading 3 AI models (~36 MB, cached after first visit)…<br><small>${parts}</small>`;
   };
-  const [g, w] = await Promise.all([
+  const [g, w1, w2] = await Promise.all([
     fetchModel('general.onnx', p => { progress.general = p; report(); }),
     fetchModel('weapons.onnx', p => { progress.weapons = p; report(); }),
+    fetchModel('weapons2.onnx', p => { progress.weapons2 = p; report(); }),
   ]);
   const general = await ort.InferenceSession.create(g, opts);
-  const weapons = await ort.InferenceSession.create(w, opts);
+  const weapons = [
+    await ort.InferenceSession.create(w1, opts),
+    await ort.InferenceSession.create(w2, opts),
+  ];
   sessions = { general, weapons };
   ph.textContent = 'Models ready. Start the camera or try the sample image.';
   $('btnCam').disabled = false;
@@ -181,6 +195,30 @@ function nms(boxes) {
   return keep;
 }
 
+function mergeCandidates(perModel) {
+  // Collapse same-label overlapping boxes from different weapons models into
+  // one detection that remembers how many models agreed.
+  const merged = [];
+  perModel.forEach((candidates, modelIdx) => {
+    for (const cand of candidates) {
+      const match = merged.find(m => m.label === cand.label
+                                     && iou(m, cand) > ENSEMBLE_IOU);
+      if (match) {
+        match.models.add(modelIdx);
+        if (cand.confidence > match.confidence) {
+          match.confidence = cand.confidence;
+          match.x1 = cand.x1; match.y1 = cand.y1;
+          match.x2 = cand.x2; match.y2 = cand.y2;
+        }
+      } else {
+        cand.models = new Set([modelIdx]);
+        merged.push(cand);
+      }
+    }
+  });
+  return merged;
+}
+
 function fuseWeapons(candidates, general, sw, sh) {
   const frameArea = sw * sh;
   const persons = general.filter(d => d.kind === 'person');
@@ -199,14 +237,16 @@ function fuseWeapons(candidates, general, sw, sh) {
     if (distractors.some(d => iou(cand, d) > DISTRACTOR_IOU
                               && d.confidence > 0.8 * cand.confidence)) continue;
 
-    let basis, bar;
-    if (cand.label === 'knife' && cocoKnives.some(k => iou(cand, k) > 0.3)) {
-      basis = 'agrees_coco'; bar = WEAPON_CONF_AGREE;
-    } else if (persons.some(p => boxesNear(cand, p))) {
-      basis = 'near_person'; bar = WEAPON_CONF_NEAR_PERSON;
-    } else {
-      basis = 'high_conf'; bar = WEAPON_CONF_ALONE;
-    }
+    // Tiered acceptance: use the lowest bar this candidate qualifies for
+    const bars = [['high_conf', WEAPON_CONF_ALONE]];
+    if (persons.some(p => boxesNear(cand, p)))
+      bars.push(['near_person', WEAPON_CONF_NEAR_PERSON]);
+    if ((cand.models || new Set()).size >= 2)
+      bars.push(['ensemble_agree', WEAPON_CONF_ENSEMBLE]);
+    if (cand.label === 'knife' && cocoKnives.some(k => iou(cand, k) > 0.3))
+      bars.push(['agrees_coco', WEAPON_CONF_AGREE]);
+
+    const [basis, bar] = bars.reduce((a, b) => a[1] <= b[1] ? a : b);
     if (cand.confidence >= bar) { cand.basis = basis; accepted.push(cand); }
   }
   return accepted;
@@ -218,11 +258,15 @@ async function detect(source, sw, sh) {
   const tensor = new ort.Tensor('float32', lb.input, [1, 3, MODEL_SIZE, MODEL_SIZE]);
 
   const gOut = await sessions.general.run({ [sessions.general.inputNames[0]]: tensor });
-  const wOut = await sessions.weapons.run({ [sessions.weapons.inputNames[0]]: tensor });
-
   const general = decode(gOut[sessions.general.outputNames[0]].data, COCO, GENERAL_CONF, lb, false);
-  const candidates = decode(wOut[sessions.weapons.outputNames[0]].data, WEAPON_NAMES, WEAPON_CANDIDATE_CONF, lb, true);
-  const weapons = fuseWeapons(candidates, general, sw, sh);
+
+  const perModel = [];
+  for (const session of sessions.weapons) {
+    const out = await session.run({ [session.inputNames[0]]: tensor });
+    perModel.push(decode(out[session.outputNames[0]].data, WEAPON_NAMES,
+                         WEAPON_CANDIDATE_CONF, lb, true));
+  }
+  const weapons = fuseWeapons(mergeCandidates(perModel), general, sw, sh);
 
   const dets = [...general.filter(d => d.kind !== 'other'), ...weapons];
   return { dets, ms: performance.now() - start };
@@ -245,7 +289,7 @@ function updateTracks(persons) {
       unmatched.splice(unmatched.indexOf(best), 1);
       t.cx = (best.x1 + best.x2) / 2; t.cy = (best.y1 + best.y2) / 2;
       t.box = best; t.lastSeen = now;
-      t.positions.push([t.cx, t.cy]);
+      t.positions.push([now, t.cx, t.cy]);
       if (t.positions.length > 150) t.positions.shift();
       best.trackId = t.id;
     }
@@ -253,7 +297,7 @@ function updateTracks(persons) {
   for (const d of unmatched) {
     const cx = (d.x1 + d.x2) / 2, cy = (d.y1 + d.y2) / 2;
     const t = { id: nextTrackId++, cx, cy, box: d, firstSeen: now, lastSeen: now,
-                positions: [[cx, cy]], nearVehicleSince: null };
+                positions: [[now, cx, cy]], nearVehicleSince: null };
     d.trackId = t.id;
     tracks.push(t);
   }
@@ -264,13 +308,25 @@ function updateTracks(persons) {
 function travelRadius(t) {
   if (t.positions.length < 2) return 0;
   let sx = 0, sy = 0;
-  for (const [x, y] of t.positions) { sx += x; sy += y; }
+  for (const [, x, y] of t.positions) { sx += x; sy += y; }
   const mx = sx / t.positions.length, my = sy / t.positions.length;
-  return Math.max(...t.positions.map(([x, y]) => Math.hypot(x - mx, y - my)));
+  return Math.max(...t.positions.map(([, x, y]) => Math.hypot(x - mx, y - my)));
+}
+
+function trackSpeed(t) {
+  // Mean speed in px/s over roughly the last second of history
+  if (t.positions.length < 2) return 0;
+  const tNow = t.positions[t.positions.length - 1][0];
+  const recent = t.positions.filter(p => tNow - p[0] <= 1.2);
+  if (recent.length < 2) return 0;
+  const dt = recent[recent.length - 1][0] - recent[0][0];
+  if (dt <= 0) return 0;
+  return Math.hypot(recent[recent.length - 1][1] - recent[0][1],
+                    recent[recent.length - 1][2] - recent[0][2]) / dt;
 }
 
 // ----------------------------------------------------------- threat rules --
-let weaponWindow = [], weaponFirstSeen = null;
+let weaponWindow = [], weaponFirstSeen = null, fightWindow = [];
 
 function boxesNear(a, b, margin = 40) {
   return !(a.x2 + margin < b.x1 || b.x2 + margin < a.x1 ||
@@ -283,6 +339,7 @@ function classify(dets, w, h, isStatic = false) {
   const weapons = dets.filter(d => d.kind === 'weapon');
   const vehicles = dets.filter(d => d.kind === 'vehicle');
   const persons = dets.filter(d => d.kind === 'person');
+  const dangers = dets.filter(d => d.kind === 'danger');
 
   // Windowed vote: a weapon must show up in most recent frames before it
   // counts, so single-frame flickers never raise an alert. A single
@@ -310,6 +367,34 @@ function classify(dets, w, h, isStatic = false) {
     } else {
       threats.push({ level: 'HIGH', kind: 'weapon',
         message: `${top.label.toUpperCase()} detected (${(top.confidence * 100).toFixed(0)}% confidence)` });
+    }
+  }
+
+  // Altercation: two people moving fast in close quarters
+  let fightingPair = null;
+  if (!isStatic) {
+    for (let i = 0; i < tracks.length; i++) {
+      for (let j = i + 1; j < tracks.length; j++) {
+        const a = tracks[i], b = tracks[j];
+        if (boxesNear(a.box, b.box, 20)
+            && trackSpeed(a) > FIGHT_SPEED_PX && trackSpeed(b) > FIGHT_SPEED_PX) {
+          fightingPair = [a, b];
+        }
+      }
+    }
+    fightWindow.push(fightingPair !== null);
+    if (fightWindow.length > FIGHT_WINDOW) fightWindow.shift();
+    if (fightingPair && fightWindow.filter(Boolean).length >= FIGHT_VOTES) {
+      threats.push({ level: 'HIGH', kind: 'altercation',
+        message: `Rapid close-quarters movement between person #${fightingPair[0].id} and #${fightingPair[1].id} — possible altercation` });
+    }
+  }
+
+  // Dangerous object carried by a person
+  for (const d of dangers) {
+    if (persons.some(p => boxesNear(d, p))) {
+      threats.push({ level: 'MEDIUM', kind: 'suspicious_object',
+        message: `${d.label[0].toUpperCase() + d.label.slice(1)} (${(d.confidence * 100).toFixed(0)}%) near a person` });
     }
   }
 
@@ -494,7 +579,7 @@ $('btnCam').onclick = async () => {
   $('btnCam').disabled = true;
   $('btnStop').disabled = false;
   running = true;
-  tracks = []; weaponWindow = []; weaponFirstSeen = null;
+  tracks = []; weaponWindow = []; weaponFirstSeen = null; fightWindow = [];
   cameraLoop();
 };
 
@@ -510,7 +595,7 @@ async function detectImage(img) {
   $('btnStop').onclick();
   $('placeholder').hidden = true;
   canvas.hidden = false;
-  tracks = []; weaponWindow = []; weaponFirstSeen = null;
+  tracks = []; weaponWindow = []; weaponFirstSeen = null; fightWindow = [];
   const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
   const result = await processFrame(img, w, h, true);
   return result;
@@ -536,7 +621,7 @@ $('fileInput').onchange = async e => {
   if (!file) return;
   const img = new Image();
   await new Promise((res, rej) => {
-    img.onload = res; img.onerror = rej; img.src = URL.createObjectURL(img.file || file);
+    img.onload = res; img.onerror = rej; img.src = URL.createObjectURL(file);
   });
   await detectImage(img);
 };

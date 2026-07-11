@@ -18,7 +18,7 @@ class Track:
     box: tuple
     first_seen: float
     last_seen: float
-    positions: list = field(default_factory=list)  # recent centers
+    positions: list = field(default_factory=list)  # (t, x, y) history
     near_vehicle_since: float | None = None
 
     @property
@@ -29,10 +29,25 @@ class Track:
         """How far the track has wandered from its average position."""
         if len(self.positions) < 2:
             return 0.0
-        xs = [p[0] for p in self.positions]
-        ys = [p[1] for p in self.positions]
+        xs = [p[1] for p in self.positions]
+        ys = [p[2] for p in self.positions]
         cx, cy = sum(xs) / len(xs), sum(ys) / len(ys)
-        return max(math.hypot(x - cx, y - cy) for x, y in self.positions)
+        return max(math.hypot(x - cx, y - cy) for _, x, y in self.positions)
+
+    def speed(self) -> float:
+        """Mean speed in px/s over roughly the last second of history."""
+        if len(self.positions) < 2:
+            return 0.0
+        t_now = self.positions[-1][0]
+        recent = [p for p in self.positions if t_now - p[0] <= 1.2]
+        if len(recent) < 2:
+            return 0.0
+        dt = recent[-1][0] - recent[0][0]
+        if dt <= 0:
+            return 0.0
+        dist = math.hypot(recent[-1][1] - recent[0][1],
+                          recent[-1][2] - recent[0][2])
+        return dist / dt
 
 
 class CentroidTracker:
@@ -61,7 +76,7 @@ class CentroidTracker:
                 track.center = best.center
                 track.box = best.box
                 track.last_seen = now
-                track.positions.append(best.center)
+                track.positions.append((now, *best.center))
                 if len(track.positions) > 150:
                     track.positions.pop(0)
                 best.track_id = track.track_id
@@ -70,7 +85,8 @@ class CentroidTracker:
         for det in unmatched:
             track = Track(
                 track_id=self._next_id, center=det.center, box=det.box,
-                first_seen=now, last_seen=now, positions=[det.center],
+                first_seen=now, last_seen=now,
+                positions=[(now, *det.center)],
             )
             det.track_id = track.track_id
             self.tracks[self._next_id] = track

@@ -26,6 +26,7 @@ KIND_COLORS = {
     "vehicle": (230, 180, 60),
     "package": (200, 160, 120),
     "weapon": (60, 60, 230),
+    "danger": (0, 140, 255),
 }
 
 

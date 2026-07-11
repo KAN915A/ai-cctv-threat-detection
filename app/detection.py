@@ -1,8 +1,11 @@
-"""Detection engine: a general COCO model + a custom weapons model, fused.
+"""Detection engine: COCO context model + an ensemble of weapons models.
 
-The weapons model alone false-positives heavily (laptop screens, pens,
-whole-room boxes). ``fuse_weapons`` cross-checks every weapon candidate
-against the COCO model and scene geometry before it is allowed through.
+The weapons models alone false-positive heavily (laptop screens, pens,
+whole-room boxes). Two defenses:
+  * ensemble agreement — the same box found by both weapons models is far
+    more trustworthy than either alone;
+  * ``fuse_weapons`` — cross-checks every candidate against the COCO model
+    and scene geometry before it is allowed through.
 """
 
 import time
@@ -11,12 +14,13 @@ from dataclasses import dataclass, field
 from ultralytics import YOLO
 
 from .config import (
+    DANGEROUS_OBJECTS,
     DISTRACTOR_CLASSES,
     GENERAL_MODEL_PATH,
     PACKAGE_CLASSES,
     PERSON_CLASSES,
     VEHICLE_CLASSES,
-    WEAPON_MODEL_PATH,
+    WEAPON_MODEL_PATHS,
     settings,
 )
 
@@ -24,7 +28,7 @@ from .config import (
 @dataclass
 class Detection:
     label: str
-    kind: str          # person | vehicle | package | weapon | other
+    kind: str          # person | vehicle | package | weapon | danger | other
     confidence: float
     box: tuple         # x1, y1, x2, y2 in frame pixels
     track_id: int | None = None
@@ -44,6 +48,8 @@ def _kind_for(label: str) -> str:
         return "vehicle"
     if l in PACKAGE_CLASSES:
         return "package"
+    if l in DANGEROUS_OBJECTS:
+        return "danger"
     return "other"
 
 
@@ -61,15 +67,37 @@ def _near(a: tuple, b: tuple, margin: int = 40) -> bool:
                 a[3] + margin < b[1] or b[3] + margin < a[1])
 
 
+def merge_candidates(per_model: list[list[Detection]]) -> list[Detection]:
+    """Collapse same-label overlapping boxes from different weapons models
+    into one detection that remembers how many models agreed."""
+    merged: list[Detection] = []
+    for model_idx, candidates in enumerate(per_model):
+        for cand in candidates:
+            match = next(
+                (m for m in merged
+                 if m.label == cand.label
+                 and _iou(m.box, cand.box) > settings.ensemble_iou),
+                None)
+            if match is not None:
+                match.meta["models"].add(model_idx)
+                if cand.confidence > match.confidence:
+                    match.confidence = cand.confidence
+                    match.box = cand.box
+            else:
+                cand.meta["models"] = {model_idx}
+                merged.append(cand)
+    return merged
+
+
 def fuse_weapons(
     candidates: list[Detection],
     general: list[Detection],
     frame_shape: tuple,
 ) -> list[Detection]:
-    """Filter raw weapon candidates using the COCO model + scene geometry.
+    """Filter weapon candidates using the COCO model + scene geometry.
 
     Returns the accepted subset, with ``meta['basis']`` explaining why each
-    survived (agrees_coco / near_person / high_conf).
+    survived (agrees_coco / ensemble_agree / near_person / high_conf).
     """
     h, w = frame_shape[:2]
     frame_area = float(h * w)
@@ -102,15 +130,17 @@ def fuse_weapons(
                for d in distractors):
             continue
 
-        # Tiered acceptance
+        # Tiered acceptance: use the lowest bar this candidate qualifies for
+        bars = [("high_conf", settings.weapon_conf_alone)]
+        if any(_near(cand.box, p.box) for p in persons):
+            bars.append(("near_person", settings.weapon_conf_near_person))
+        if len(cand.meta.get("models", ())) >= 2:
+            bars.append(("ensemble_agree", settings.weapon_conf_ensemble))
         if (cand.label.lower() == "knife"
                 and any(_iou(cand.box, k.box) > 0.3 for k in coco_knives)):
-            basis, bar = "agrees_coco", settings.weapon_conf_agree
-        elif any(_near(cand.box, p.box) for p in persons):
-            basis, bar = "near_person", settings.weapon_conf_near_person
-        else:
-            basis, bar = "high_conf", settings.weapon_conf_alone
+            bars.append(("agrees_coco", settings.weapon_conf_agree))
 
+        basis, bar = min(bars, key=lambda item: item[1])
         if cand.confidence >= bar:
             cand.meta["basis"] = basis
             accepted.append(cand)
@@ -122,9 +152,12 @@ class DetectionEngine:
     def __init__(self):
         print("Loading general model (people/vehicles)...")
         self.general = YOLO(GENERAL_MODEL_PATH)
-        print("Loading weapons model...")
-        self.weapons = YOLO(WEAPON_MODEL_PATH)
-        print(f"Weapon classes: {set(self.weapons.names.values())}")
+        self.weapons = []
+        for path in WEAPON_MODEL_PATHS:
+            print(f"Loading weapons model: {path}")
+            self.weapons.append(YOLO(path))
+        print(f"Weapons ensemble: {len(self.weapons)} models, "
+              f"classes {set(self.weapons[0].names.values())}")
 
     def _run_general(self, frame) -> list[Detection]:
         detections = []
@@ -140,20 +173,23 @@ class DetectionEngine:
         return detections
 
     def _run_weapons(self, frame) -> list[Detection]:
-        candidates = []
-        for result in self.weapons(frame, conf=settings.weapon_candidate_conf,
-                                   verbose=False):
-            for box in result.boxes:
-                label = self.weapons.names[int(box.cls[0])]
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
-                candidates.append(Detection(
-                    label=label, kind="weapon",
-                    confidence=float(box.conf[0]), box=(x1, y1, x2, y2),
-                ))
-        return candidates
+        per_model = []
+        for model in self.weapons:
+            candidates = []
+            for result in model(frame, conf=settings.weapon_candidate_conf,
+                                verbose=False):
+                for box in result.boxes:
+                    label = model.names[int(box.cls[0])]
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    candidates.append(Detection(
+                        label=label, kind="weapon",
+                        confidence=float(box.conf[0]), box=(x1, y1, x2, y2),
+                    ))
+            per_model.append(candidates)
+        return merge_candidates(per_model)
 
     def detect(self, frame) -> tuple[list[Detection], float]:
-        """Run both models + fusion. Returns (detections, inference_ms)."""
+        """Run all models + fusion. Returns (detections, inference_ms)."""
         start = time.time()
 
         general = self._run_general(frame)
