@@ -18,7 +18,17 @@ Two editions share the same detection models and threat rules:
 
 Two YOLOv8 detectors run on every frame — a COCO model (people, vehicles,
 packages) and a custom-trained guns/knife model — feeding a centroid tracker
-and rule engine:
+and rule engine.
+
+Because the raw weapons model false-positives heavily (laptop screens, pens,
+whole-room boxes), weapon candidates pass a **fusion filter** before they
+count: oversized boxes are rejected, boxes coinciding with a person are
+rejected, boxes overlapping a confident everyday COCO object (laptop, phone,
+remote…) are rejected, and the confidence bar depends on context (lower when
+a person is nearby or COCO's own `knife` class agrees, higher for weapons
+floating alone). A temporal vote (weapon in ≥ 5 of the last 8 frames) then
+suppresses single-frame flickers. Measured on the weapons model's own demo
+video: 13/13 frames with real knives still detect after filtering.
 
 | Level | Rule |
 |---|---|

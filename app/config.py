@@ -23,17 +23,38 @@ VEHICLE_CLASSES = {"car", "truck", "bus", "motorcycle", "bicycle"}
 PACKAGE_CLASSES = {"backpack", "handbag", "suitcase"}
 
 
+# COCO objects that commonly get mistaken for weapons: if one of these
+# confidently overlaps a weapon box, the weapon detection is rejected
+DISTRACTOR_CLASSES = {
+    "cell phone", "remote", "laptop", "tv", "keyboard", "mouse", "book",
+    "bottle", "cup", "umbrella", "toothbrush", "hair drier", "clock",
+    "teddy bear", "banana",
+}
+
+
 @dataclass
 class Settings:
     # Detection
-    weapon_confidence: float = 0.45
     general_confidence: float = 0.40
     inference_width: int = 640
+
+    # Weapon fusion: candidates below these bars are rejected as noise.
+    weapon_candidate_conf: float = 0.30   # raw model threshold (candidates)
+    weapon_conf_near_person: float = 0.55  # weapon overlapping a person
+    weapon_conf_agree: float = 0.40        # custom + COCO 'knife' agree
+    weapon_conf_alone: float = 0.70        # no person anywhere near
+    weapon_max_area_frac: float = 0.30     # bigger than this = misfire
+    weapon_person_iou_veto: float = 0.50   # box ≈ person box = misfire
+    distractor_iou: float = 0.40
+    distractor_min_conf: float = 0.40
 
     # Threat rules (seconds)
     loiter_seconds: float = 15.0        # person mostly stationary this long -> LOW
     vehicle_lurk_seconds: float = 8.0   # person lingering beside a vehicle -> MEDIUM
-    weapon_confirm_frames: int = 3      # consecutive weapon frames before HIGH
+    # Temporal vote: weapon must appear in >= weapon_votes of the last
+    # weapon_window frames before HIGH fires (kills one-frame flickers)
+    weapon_window: int = 8
+    weapon_votes: int = 5
     weapon_critical_seconds: float = 5.0  # weapon persisting this long -> CRITICAL
 
     # Alert engine

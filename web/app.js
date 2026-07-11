@@ -11,13 +11,30 @@ const GITHUB_MODEL_BASE =
 
 const MODEL_SIZE = 640;
 const GENERAL_CONF = 0.40;
-const WEAPON_CONF = 0.45;
 const NMS_IOU = 0.45;
+
+// Weapon fusion: candidates are cross-checked against the COCO model and
+// scene geometry before they count (the raw weapons model false-positives
+// on laptops, pens, screens, whole-room boxes).
+const WEAPON_CANDIDATE_CONF = 0.30;   // raw model threshold
+const WEAPON_CONF_NEAR_PERSON = 0.55; // weapon overlapping a person
+const WEAPON_CONF_AGREE = 0.40;       // custom + COCO 'knife' agree
+const WEAPON_CONF_ALONE = 0.70;       // no person anywhere near
+const WEAPON_MAX_AREA_FRAC = 0.30;    // bigger than this = misfire
+const WEAPON_PERSON_IOU_VETO = 0.50;  // box ≈ person box = misfire
+const DISTRACTOR_IOU = 0.40;
+const DISTRACTOR_MIN_CONF = 0.40;
+const DISTRACTORS = new Set(['cell phone','remote','laptop','tv','keyboard',
+  'mouse','book','bottle','cup','umbrella','toothbrush','hair drier','clock',
+  'teddy bear','banana']);
 
 const LOITER_SECONDS = 15;
 const LOITER_RADIUS = 90;            // px in model space
 const VEHICLE_LURK_SECONDS = 8;
-const WEAPON_CONFIRM_FRAMES = 3;
+// Temporal vote: weapon must appear in >= WEAPON_VOTES of the last
+// WEAPON_WINDOW frames before HIGH fires (kills one-frame flickers)
+const WEAPON_WINDOW = 8;
+const WEAPON_VOTES = 5;
 const WEAPON_CRITICAL_SECONDS = 5;
 const ALERT_COOLDOWN_SECONDS = 30;
 
@@ -36,7 +53,7 @@ function kindFor(label, fromWeaponModel) {
   if (label === 'person') return 'person';
   if (VEHICLES.has(label)) return 'vehicle';
   if (PACKAGES.has(label)) return 'package';
-  return null;
+  return 'other';   // kept for weapon fusion (distractor veto), not displayed
 }
 
 // ------------------------------------------------------------------- dom --
@@ -137,7 +154,6 @@ function decode(output, names, conf, lb, fromWeaponModel) {
     const w = output[2 * anchors + a], h = output[3 * anchors + a];
     const label = names[bestCls];
     const kind = kindFor(label, fromWeaponModel);
-    if (!kind) continue;
     boxes.push({
       label, kind, confidence: best,
       x1: (cx - w / 2 - lb.dx) / lb.scale, y1: (cy - h / 2 - lb.dy) / lb.scale,
@@ -165,6 +181,37 @@ function nms(boxes) {
   return keep;
 }
 
+function fuseWeapons(candidates, general, sw, sh) {
+  const frameArea = sw * sh;
+  const persons = general.filter(d => d.kind === 'person');
+  const cocoKnives = general.filter(d => d.label === 'knife');
+  const distractors = general.filter(
+    d => DISTRACTORS.has(d.label) && d.confidence >= DISTRACTOR_MIN_CONF);
+
+  const accepted = [];
+  for (const cand of candidates) {
+    const areaFrac = (cand.x2 - cand.x1) * (cand.y2 - cand.y1) / frameArea;
+    // Huge boxes are misfires — real handheld weapons are small in frame
+    if (areaFrac > WEAPON_MAX_AREA_FRAC) continue;
+    // A "weapon" box that coincides with a person box IS the person
+    if (persons.some(p => iou(cand, p) > WEAPON_PERSON_IOU_VETO)) continue;
+    // Confident everyday object in the same spot (laptop, phone, ...)
+    if (distractors.some(d => iou(cand, d) > DISTRACTOR_IOU
+                              && d.confidence > 0.8 * cand.confidence)) continue;
+
+    let basis, bar;
+    if (cand.label === 'knife' && cocoKnives.some(k => iou(cand, k) > 0.3)) {
+      basis = 'agrees_coco'; bar = WEAPON_CONF_AGREE;
+    } else if (persons.some(p => boxesNear(cand, p))) {
+      basis = 'near_person'; bar = WEAPON_CONF_NEAR_PERSON;
+    } else {
+      basis = 'high_conf'; bar = WEAPON_CONF_ALONE;
+    }
+    if (cand.confidence >= bar) { cand.basis = basis; accepted.push(cand); }
+  }
+  return accepted;
+}
+
 async function detect(source, sw, sh) {
   const start = performance.now();
   const lb = letterbox(source, sw, sh);
@@ -173,10 +220,11 @@ async function detect(source, sw, sh) {
   const gOut = await sessions.general.run({ [sessions.general.inputNames[0]]: tensor });
   const wOut = await sessions.weapons.run({ [sessions.weapons.inputNames[0]]: tensor });
 
-  const dets = [
-    ...decode(gOut[sessions.general.outputNames[0]].data, COCO, GENERAL_CONF, lb, false),
-    ...decode(wOut[sessions.weapons.outputNames[0]].data, WEAPON_NAMES, WEAPON_CONF, lb, true),
-  ];
+  const general = decode(gOut[sessions.general.outputNames[0]].data, COCO, GENERAL_CONF, lb, false);
+  const candidates = decode(wOut[sessions.weapons.outputNames[0]].data, WEAPON_NAMES, WEAPON_CANDIDATE_CONF, lb, true);
+  const weapons = fuseWeapons(candidates, general, sw, sh);
+
+  const dets = [...general.filter(d => d.kind !== 'other'), ...weapons];
   return { dets, ms: performance.now() - start };
 }
 
@@ -222,7 +270,7 @@ function travelRadius(t) {
 }
 
 // ----------------------------------------------------------- threat rules --
-let weaponStreak = 0, weaponFirstSeen = null;
+let weaponWindow = [], weaponFirstSeen = null;
 
 function boxesNear(a, b, margin = 40) {
   return !(a.x2 + margin < b.x1 || b.x2 + margin < a.x1 ||
@@ -236,12 +284,17 @@ function classify(dets, w, h) {
   const vehicles = dets.filter(d => d.kind === 'vehicle');
   const persons = dets.filter(d => d.kind === 'person');
 
-  if (weapons.length) {
-    weaponStreak++;
+  // Windowed vote: a weapon must show up in most recent frames before it
+  // counts, so single-frame flickers never raise an alert.
+  weaponWindow.push(weapons.length > 0);
+  if (weaponWindow.length > WEAPON_WINDOW) weaponWindow.shift();
+  const votes = weaponWindow.filter(Boolean).length;
+  const confirmed = votes >= WEAPON_VOTES;
+  if (confirmed) {
     if (weaponFirstSeen === null) weaponFirstSeen = now;
-  } else { weaponStreak = 0; weaponFirstSeen = null; }
+  } else if (votes === 0) weaponFirstSeen = null;
 
-  if (weaponStreak >= WEAPON_CONFIRM_FRAMES) {
+  if (confirmed && weapons.length) {
     const top = weapons.reduce((a, b) => a.confidence > b.confidence ? a : b);
     const persisted = now - weaponFirstSeen;
     if (persisted >= WEAPON_CRITICAL_SECONDS) {
@@ -434,7 +487,7 @@ $('btnCam').onclick = async () => {
   $('btnCam').disabled = true;
   $('btnStop').disabled = false;
   running = true;
-  tracks = []; weaponStreak = 0; weaponFirstSeen = null;
+  tracks = []; weaponWindow = []; weaponFirstSeen = null;
   cameraLoop();
 };
 

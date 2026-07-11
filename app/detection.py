@@ -1,4 +1,9 @@
-"""Detection engine: runs a general COCO model + a custom weapons model."""
+"""Detection engine: a general COCO model + a custom weapons model, fused.
+
+The weapons model alone false-positives heavily (laptop screens, pens,
+whole-room boxes). ``fuse_weapons`` cross-checks every weapon candidate
+against the COCO model and scene geometry before it is allowed through.
+"""
 
 import time
 from dataclasses import dataclass, field
@@ -6,6 +11,7 @@ from dataclasses import dataclass, field
 from ultralytics import YOLO
 
 from .config import (
+    DISTRACTOR_CLASSES,
     GENERAL_MODEL_PATH,
     PACKAGE_CLASSES,
     PERSON_CLASSES,
@@ -41,48 +47,119 @@ def _kind_for(label: str) -> str:
     return "other"
 
 
+def _iou(a: tuple, b: tuple) -> float:
+    x1, y1 = max(a[0], b[0]), max(a[1], b[1])
+    x2, y2 = min(a[2], b[2]), min(a[3], b[3])
+    inter = max(0, x2 - x1) * max(0, y2 - y1)
+    area_a = (a[2] - a[0]) * (a[3] - a[1])
+    area_b = (b[2] - b[0]) * (b[3] - b[1])
+    return inter / (area_a + area_b - inter + 1e-9)
+
+
+def _near(a: tuple, b: tuple, margin: int = 40) -> bool:
+    return not (a[2] + margin < b[0] or b[2] + margin < a[0] or
+                a[3] + margin < b[1] or b[3] + margin < a[1])
+
+
+def fuse_weapons(
+    candidates: list[Detection],
+    general: list[Detection],
+    frame_shape: tuple,
+) -> list[Detection]:
+    """Filter raw weapon candidates using the COCO model + scene geometry.
+
+    Returns the accepted subset, with ``meta['basis']`` explaining why each
+    survived (agrees_coco / near_person / high_conf).
+    """
+    h, w = frame_shape[:2]
+    frame_area = float(h * w)
+
+    persons = [d for d in general if d.kind == "person"]
+    coco_knives = [d for d in general if d.label.lower() == "knife"]
+    distractors = [
+        d for d in general
+        if d.label.lower() in DISTRACTOR_CLASSES
+        and d.confidence >= settings.distractor_min_conf
+    ]
+
+    accepted = []
+    for cand in candidates:
+        x1, y1, x2, y2 = cand.box
+        area_frac = ((x2 - x1) * (y2 - y1)) / frame_area
+
+        # Huge boxes are misfires — real handheld weapons are small in frame
+        if area_frac > settings.weapon_max_area_frac:
+            continue
+
+        # A "weapon" box that coincides with a person box IS the person
+        if any(_iou(cand.box, p.box) > settings.weapon_person_iou_veto
+               for p in persons):
+            continue
+
+        # Confident everyday object in the same spot (laptop, phone, ...)
+        if any(_iou(cand.box, d.box) > settings.distractor_iou
+               and d.confidence > 0.8 * cand.confidence
+               for d in distractors):
+            continue
+
+        # Tiered acceptance
+        if (cand.label.lower() == "knife"
+                and any(_iou(cand.box, k.box) > 0.3 for k in coco_knives)):
+            basis, bar = "agrees_coco", settings.weapon_conf_agree
+        elif any(_near(cand.box, p.box) for p in persons):
+            basis, bar = "near_person", settings.weapon_conf_near_person
+        else:
+            basis, bar = "high_conf", settings.weapon_conf_alone
+
+        if cand.confidence >= bar:
+            cand.meta["basis"] = basis
+            accepted.append(cand)
+
+    return accepted
+
+
 class DetectionEngine:
     def __init__(self):
         print("Loading general model (people/vehicles)...")
         self.general = YOLO(GENERAL_MODEL_PATH)
         print("Loading weapons model...")
         self.weapons = YOLO(WEAPON_MODEL_PATH)
-        self.weapon_labels = {
-            name for name in self.weapons.names.values()
-        }
-        print(f"Weapon classes: {self.weapon_labels}")
+        print(f"Weapon classes: {set(self.weapons.names.values())}")
 
-    def detect(self, frame) -> tuple[list[Detection], float]:
-        """Run both models on a frame. Returns (detections, inference_ms)."""
-        start = time.time()
-        detections: list[Detection] = []
-
-        general_results = self.general(
-            frame, conf=settings.general_confidence, verbose=False
-        )
-        for result in general_results:
+    def _run_general(self, frame) -> list[Detection]:
+        detections = []
+        for result in self.general(frame, conf=settings.general_confidence,
+                                   verbose=False):
             for box in result.boxes:
                 label = self.general.names[int(box.cls[0])]
-                kind = _kind_for(label)
-                if kind == "other":
-                    continue
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
                 detections.append(Detection(
-                    label=label, kind=kind,
+                    label=label, kind=_kind_for(label),
                     confidence=float(box.conf[0]), box=(x1, y1, x2, y2),
                 ))
+        return detections
 
-        weapon_results = self.weapons(
-            frame, conf=settings.weapon_confidence, verbose=False
-        )
-        for result in weapon_results:
+    def _run_weapons(self, frame) -> list[Detection]:
+        candidates = []
+        for result in self.weapons(frame, conf=settings.weapon_candidate_conf,
+                                   verbose=False):
             for box in result.boxes:
                 label = self.weapons.names[int(box.cls[0])]
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
-                detections.append(Detection(
+                candidates.append(Detection(
                     label=label, kind="weapon",
                     confidence=float(box.conf[0]), box=(x1, y1, x2, y2),
                 ))
+        return candidates
 
+    def detect(self, frame) -> tuple[list[Detection], float]:
+        """Run both models + fusion. Returns (detections, inference_ms)."""
+        start = time.time()
+
+        general = self._run_general(frame)
+        candidates = self._run_weapons(frame)
+        weapons = fuse_weapons(candidates, general, frame.shape)
+
+        detections = [d for d in general if d.kind != "other"] + weapons
         elapsed_ms = (time.time() - start) * 1000
         return detections, elapsed_ms

@@ -9,6 +9,7 @@ brief:
 """
 
 import time
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -51,7 +52,7 @@ def is_night() -> bool:
 
 class ThreatClassifier:
     def __init__(self):
-        self.weapon_streak = 0
+        self.weapon_window: deque = deque(maxlen=settings.weapon_window)
         self.weapon_first_seen: float | None = None
 
     def classify(
@@ -69,15 +70,17 @@ class ThreatClassifier:
         weapons = [d for d in detections if d.kind == "weapon"]
 
         # --- Weapon rules (HIGH -> CRITICAL) --------------------------------
-        if weapons:
-            self.weapon_streak += 1
+        # Windowed vote: a weapon must show up in most recent frames before
+        # it counts, so single-frame flickers never raise an alert.
+        self.weapon_window.append(bool(weapons))
+        confirmed = sum(self.weapon_window) >= settings.weapon_votes
+        if confirmed:
             if self.weapon_first_seen is None:
                 self.weapon_first_seen = now
-        else:
-            self.weapon_streak = 0
+        elif not any(self.weapon_window):
             self.weapon_first_seen = None
 
-        if self.weapon_streak >= settings.weapon_confirm_frames:
+        if confirmed and weapons:
             top = max(weapons, key=lambda w: w.confidence)
             persisted = now - (self.weapon_first_seen or now)
             if persisted >= settings.weapon_critical_seconds:
