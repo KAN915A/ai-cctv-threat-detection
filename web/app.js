@@ -277,7 +277,7 @@ function boxesNear(a, b, margin = 40) {
            a.y2 + margin < b.y1 || b.y2 + margin < a.y1);
 }
 
-function classify(dets, w, h) {
+function classify(dets, w, h, isStatic = false) {
   const threats = [];
   const now = performance.now() / 1000;
   const weapons = dets.filter(d => d.kind === 'weapon');
@@ -285,18 +285,25 @@ function classify(dets, w, h) {
   const persons = dets.filter(d => d.kind === 'person');
 
   // Windowed vote: a weapon must show up in most recent frames before it
-  // counts, so single-frame flickers never raise an alert.
-  weaponWindow.push(weapons.length > 0);
-  if (weaponWindow.length > WEAPON_WINDOW) weaponWindow.shift();
-  const votes = weaponWindow.filter(Boolean).length;
-  const confirmed = votes >= WEAPON_VOTES;
-  if (confirmed) {
-    if (weaponFirstSeen === null) weaponFirstSeen = now;
-  } else if (votes === 0) weaponFirstSeen = null;
+  // counts, so single-frame flickers never raise an alert. A single
+  // uploaded image has no history, so it bypasses the vote.
+  let confirmed;
+  if (isStatic) {
+    confirmed = weapons.length > 0;
+    weaponFirstSeen = null;   // persistence is meaningless for one image
+  } else {
+    weaponWindow.push(weapons.length > 0);
+    if (weaponWindow.length > WEAPON_WINDOW) weaponWindow.shift();
+    const votes = weaponWindow.filter(Boolean).length;
+    confirmed = votes >= WEAPON_VOTES;
+    if (confirmed) {
+      if (weaponFirstSeen === null) weaponFirstSeen = now;
+    } else if (votes === 0) weaponFirstSeen = null;
+  }
 
   if (confirmed && weapons.length) {
     const top = weapons.reduce((a, b) => a.confidence > b.confidence ? a : b);
-    const persisted = now - weaponFirstSeen;
+    const persisted = weaponFirstSeen === null ? 0 : now - weaponFirstSeen;
     if (persisted >= WEAPON_CRITICAL_SECONDS) {
       threats.push({ level: 'CRITICAL', kind: 'weapon_persistent',
         message: `${top.label.toUpperCase()} persisting in scene for ${persisted.toFixed(0)}s — possible active threat` });
@@ -452,10 +459,10 @@ function render(source, sw, sh, dets, threats, ms) {
 }
 
 // ------------------------------------------------------------------ loops --
-async function processFrame(source, sw, sh) {
+async function processFrame(source, sw, sh, isStatic = false) {
   const { dets, ms } = await detect(source, sw, sh);
   updateTracks(dets.filter(d => d.kind === 'person'));
-  const threats = classify(dets, sw, sh);
+  const threats = classify(dets, sw, sh, isStatic);
   render(source, sw, sh, dets, threats, ms);
   fireAlerts(threats);
   return { dets, threats, ms };
@@ -503,8 +510,9 @@ async function detectImage(img) {
   $('btnStop').onclick();
   $('placeholder').hidden = true;
   canvas.hidden = false;
+  tracks = []; weaponWindow = []; weaponFirstSeen = null;
   const w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
-  const result = await processFrame(img, w, h);
+  const result = await processFrame(img, w, h, true);
   return result;
 }
 
