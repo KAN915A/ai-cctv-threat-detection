@@ -458,7 +458,14 @@ async function detectImage(img) {
 $('btnSample').onclick = async () => {
   const img = new Image();
   img.crossOrigin = 'anonymous';
-  await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = 'sample.jpg'; });
+  await new Promise((res, rej) => {
+    img.onload = res;
+    img.onerror = () => {   // not bundled in the deploy — pull from repo CDN
+      img.onerror = rej;
+      img.src = GITHUB_MODEL_BASE.replace('/models/', '/') + 'sample.jpg';
+    };
+    img.src = 'sample.jpg';
+  });
   const r = await detectImage(img);
   window.__lastResult = r;   // for automated tests
 };
