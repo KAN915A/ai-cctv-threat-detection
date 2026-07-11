@@ -1,0 +1,31 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Runtime artifacts
+events.db
+snapshots/
+detection_logs/
+weapon_detection_*.mp4
+alert.wav
+bus.jpg
+test_clip.mp4
+
+# Auto-downloaded / re-exportable models at repo root
+yolov8n.pt
+yolov8n.onnx
+
+# Local tooling
+.claude/
+.vercel/
+
+# Third-party weapons detector: keep only the trained weights + attribution
+Weapons-and-Knives-Detector-with-YOLOv8-main/**
+!Weapons-and-Knives-Detector-with-YOLOv8-main/LICENSE
+!Weapons-and-Knives-Detector-with-YOLOv8-main/README.md
+!Weapons-and-Knives-Detector-with-YOLOv8-main/runs/
+!Weapons-and-Knives-Detector-with-YOLOv8-main/runs/detect/
+!Weapons-and-Knives-Detector-with-YOLOv8-main/runs/detect/Normal/
+!Weapons-and-Knives-Detector-with-YOLOv8-main/runs/detect/Normal/weights/
+!Weapons-and-Knives-Detector-with-YOLOv8-main/runs/detect/Normal/weights/best.pt
