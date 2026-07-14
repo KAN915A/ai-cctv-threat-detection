@@ -31,7 +31,7 @@ def run(path):
     if frame is None:
         return None
     general = engine._run_general(frame)
-    candidates = engine._run_weapons(frame)
+    candidates = engine._run_weapons(frame, all_models=True)
     old = [c for c in candidates if c.confidence >= 0.45]
     new = fuse_weapons(candidates, general, frame.shape)
     return old, new

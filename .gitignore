@@ -3,7 +3,8 @@
 __pycache__/
 *.pyc
 
-# Runtime artifacts
+# Runtime artifacts (telegram.json holds your private bot token)
+telegram.json
 events.db
 snapshots/
 detection_logs/

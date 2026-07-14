@@ -10,6 +10,7 @@ from pathlib import Path
 import cv2
 
 from .config import DB_PATH, SNAPSHOT_DIR, settings
+from .telegram import TelegramNotifier
 from .threat import Threat
 
 
@@ -41,7 +42,8 @@ class AlertEngine:
         SNAPSHOT_DIR.mkdir(exist_ok=True)
         self._lock = threading.Lock()
         self._last_fired: dict[tuple, float] = {}  # (level, kind) -> ts
-        self.notifiers: list[Notifier] = [ConsoleNotifier()]
+        self.telegram = TelegramNotifier(on_verdict=self.set_verdict)
+        self.notifiers: list[Notifier] = [ConsoleNotifier(), self.telegram]
         self._init_db()
 
     def _init_db(self):
@@ -56,6 +58,9 @@ class AlertEngine:
                     snapshot TEXT
                 )
             """)
+            cols = [row[1] for row in db.execute("PRAGMA table_info(events)")]
+            if "verdict" not in cols:
+                db.execute("ALTER TABLE events ADD COLUMN verdict TEXT")
 
     def process(self, threats: list[Threat], annotated_frame) -> list[dict]:
         """Fire alerts for threats not in cooldown. Returns fired alerts."""
@@ -87,12 +92,13 @@ class AlertEngine:
             }
 
             with sqlite3.connect(DB_PATH) as db:
-                db.execute(
+                cur = db.execute(
                     "INSERT INTO events (ts, level, kind, message, snapshot) "
                     "VALUES (?, ?, ?, ?, ?)",
                     (alert["ts"], alert["level"], alert["kind"],
                      alert["message"], alert["snapshot"]),
                 )
+                alert["id"] = cur.lastrowid
 
             for notifier in self.notifiers:
                 try:
@@ -104,11 +110,19 @@ class AlertEngine:
 
         return fired
 
+    def set_verdict(self, event_id: int, verdict: str) -> None:
+        """Record the owner's judgement (real / false_alarm) on an event —
+        called from the Telegram feedback buttons."""
+        with sqlite3.connect(DB_PATH) as db:
+            db.execute("UPDATE events SET verdict = ? WHERE id = ?",
+                       (verdict, event_id))
+        print(f"[FEEDBACK] event {event_id} marked {verdict}")
+
     def recent_events(self, limit: int = 50) -> list[dict]:
         with sqlite3.connect(DB_PATH) as db:
             db.row_factory = sqlite3.Row
             rows = db.execute(
-                "SELECT ts, level, kind, message, snapshot FROM events "
-                "ORDER BY id DESC LIMIT ?", (limit,)
+                "SELECT id, ts, level, kind, message, snapshot, verdict "
+                "FROM events ORDER BY id DESC LIMIT ?", (limit,)
             ).fetchall()
         return [dict(r) for r in rows]

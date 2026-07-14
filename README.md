@@ -15,7 +15,7 @@ Two editions share the same detection models and threat rules:
 | Runs on | Vercel / any static host | Local machine (Python) |
 | Inference | ONNX Runtime Web (WebGPU/WASM), in-browser | PyTorch + OpenCV, server-side |
 | Sources | Webcam, image upload | Webcam, video files, RTSP IP cameras |
-| Alerts | Local feed + browser storage | SQLite history, snapshots, notifier hooks (SMS/push) |
+| Alerts | Local feed + browser storage | SQLite history, snapshots, **Telegram push with verdict buttons** |
 | Privacy | Video never leaves the device | Video never leaves your network |
 
 ## Detection pipeline (3 models + fusion)
@@ -81,8 +81,23 @@ python -m venv .venv
 Open http://localhost:8000 and enter a source: `0` (webcam), a video file
 path, or an `rtsp://` camera URL. Architecture and tuning knobs:
 [README_PROTOTYPE.md](README_PROTOTYPE.md); all thresholds live in
-`app/config.py`. Running three models on CPU yields ~2.5–3 FPS; trim
-`WEAPON_MODEL_PATHS` to one model for ~2× speed.
+`app/config.py`. The weapons ensemble is **interleaved** by default (one
+model per frame, round-robin, agreement checked across adjacent frames) for
+~1.5× throughput; set `ensemble_interleave = False` for strict same-frame
+agreement, or trim `WEAPON_MODEL_PATHS` to one model for maximum speed.
+
+### Telegram alerts (verify real vs false alarm from your phone)
+
+1. In Telegram, message **@BotFather** → `/newbot` → copy the bot token.
+2. Paste the token into the dashboard's **Telegram alerts** card and save.
+3. Open your new bot's chat and press **Start** — the chat is detected
+   automatically.
+
+Every alert at or above your chosen level arrives as a photo with
+**✅ Real threat / 🔕 False alarm** buttons. Your verdict is stored on the
+event in `events.db` — over time this builds a labeled dataset of confirmed
+threats and false alarms for retraining. The token lives in `telegram.json`
+(gitignored, never committed).
 
 ## Repo layout
 

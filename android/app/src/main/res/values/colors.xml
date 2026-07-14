@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="level_ok">#388E3C</color>
+    <color name="level_low">#F9A825</color>
+    <color name="level_medium">#F57C00</color>
+    <color name="level_high">#D32F2F</color>
+    <color name="level_critical">#B71C1C</color>
+    <color name="level_offline">#616161</color>
+    <color name="ic_launcher_background">#1A237E</color>
+</resources>

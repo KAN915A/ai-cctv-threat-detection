@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AI CCTV</string>
+
+    <string name="nav_live">Live</string>
+    <string name="nav_alerts">Alerts</string>
+    <string name="nav_settings">Settings</string>
+
+    <string name="live_feed">Live camera feed</string>
+    <string name="no_video">No video — start a camera below</string>
+    <string name="hint_source">Camera source (RTSP URL or webcam index)</string>
+    <string name="start_camera">Start camera</string>
+    <string name="stop_camera">Stop</string>
+
+    <string name="status_idle">Camera idle</string>
+    <string name="status_all_clear">All clear</string>
+    <string name="status_threat">%1$s ALERT</string>
+    <string name="status_unreachable">Server unreachable — check Settings</string>
+    <string name="stats_line">%1$.1f fps · %2$.1f ms inference</string>
+
+    <string name="no_events">No alerts yet</string>
+    <string name="snapshot">Alert snapshot</string>
+
+    <string name="settings_title">Settings</string>
+    <string name="hint_server_url">Detection server URL</string>
+    <string name="hint_default_source">Default camera source</string>
+    <string name="setting_notifications">Threat notifications</string>
+    <string name="setting_monitor">Background monitoring</string>
+    <string name="setting_monitor_hint">Keeps watching the server while the app is closed and notifies you on HIGH or CRITICAL threats.</string>
+    <string name="save">Save</string>
+    <string name="saved">Saved</string>
+    <string name="settings_help">The server is the machine running the AI detection backend (uvicorn app.main:app --port 8000). Camera source can be an IP camera RTSP URL, e.g. rtsp://user:pass@192.168.1.50:554/stream1, or a webcam index like 0.</string>
+
+    <string name="err_no_source">Enter a camera source first</string>
+    <string name="err_bad_url">URL must start with http:// or https://</string>
+    <string name="err_server">Server error: %1$s</string>
+
+    <string name="channel_monitor">Background monitoring</string>
+    <string name="channel_alerts">Threat alerts</string>
+    <string name="notif_monitoring">Watching your cameras</string>
+    <string name="notif_title">%1$s threat detected</string>
+    <string name="notif_generic">Threat level: %1$s</string>
+</resources>

@@ -56,6 +56,11 @@ class Settings:
     distractor_iou: float = 0.40
     distractor_min_conf: float = 0.40
     ensemble_iou: float = 0.55             # same-object match across models
+    # Interleave: run one weapons model per frame (round-robin) and merge
+    # with the other model's result from the previous frame — near-2x FPS
+    # with agreement checked across adjacent frames instead of within one.
+    ensemble_interleave: bool = True
+    ensemble_cache_seconds: float = 1.0    # max age of the cached result
 
     # Altercation heuristic: two people moving fast in close quarters
     fight_speed_px: float = 140.0          # px/s each person must exceed

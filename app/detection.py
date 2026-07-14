@@ -158,6 +158,8 @@ class DetectionEngine:
             self.weapons.append(YOLO(path))
         print(f"Weapons ensemble: {len(self.weapons)} models, "
               f"classes {set(self.weapons[0].names.values())}")
+        self._weapon_turn = 0
+        self._weapon_cache: dict[int, tuple[float, list[Detection]]] = {}
 
     def _run_general(self, frame) -> list[Detection]:
         detections = []
@@ -172,20 +174,44 @@ class DetectionEngine:
                 ))
         return detections
 
-    def _run_weapons(self, frame) -> list[Detection]:
+    def _detect_one(self, model, frame) -> list[Detection]:
+        candidates = []
+        for result in model(frame, conf=settings.weapon_candidate_conf,
+                            verbose=False):
+            for box in result.boxes:
+                label = model.names[int(box.cls[0])]
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                candidates.append(Detection(
+                    label=label, kind="weapon",
+                    confidence=float(box.conf[0]), box=(x1, y1, x2, y2),
+                ))
+        return candidates
+
+    def _run_weapons(self, frame, all_models: bool = False) -> list[Detection]:
+        """Run the weapons ensemble.
+
+        Live pipeline (interleave on): one model per frame, round-robin,
+        merged with the other model's result from the previous frame — the
+        agreement check spans adjacent frames at near-2x FPS. Pass
+        ``all_models=True`` (evals, single images) to run every model on
+        this exact frame.
+        """
+        interleave = (settings.ensemble_interleave and not all_models
+                      and len(self.weapons) > 1)
+        now = time.time()
         per_model = []
-        for model in self.weapons:
-            candidates = []
-            for result in model(frame, conf=settings.weapon_candidate_conf,
-                                verbose=False):
-                for box in result.boxes:
-                    label = model.names[int(box.cls[0])]
-                    x1, y1, x2, y2 = map(int, box.xyxy[0])
-                    candidates.append(Detection(
-                        label=label, kind="weapon",
-                        confidence=float(box.conf[0]), box=(x1, y1, x2, y2),
-                    ))
+        for idx, model in enumerate(self.weapons):
+            if interleave and idx != self._weapon_turn:
+                ts, cached = self._weapon_cache.get(idx, (0.0, []))
+                per_model.append(
+                    cached if now - ts < settings.ensemble_cache_seconds
+                    else [])
+                continue
+            candidates = self._detect_one(model, frame)
+            self._weapon_cache[idx] = (now, candidates)
             per_model.append(candidates)
+        if interleave:
+            self._weapon_turn = (self._weapon_turn + 1) % len(self.weapons)
         return merge_candidates(per_model)
 
     def detect(self, frame) -> tuple[list[Detection], float]:

@@ -77,6 +77,30 @@ def set_zone(req: ZoneRequest):
     return {"restricted_zone": settings.restricted_zone}
 
 
+# --------------------------------------------------------------- telegram --
+class TelegramConfigRequest(BaseModel):
+    token: str | None = None       # empty string clears the token
+    chat_id: str | None = None
+    min_level: str | None = None   # LOW / MEDIUM / HIGH / CRITICAL
+
+
+@app.get("/api/telegram")
+def telegram_status():
+    return pipeline.alerts.telegram.status()
+
+
+@app.post("/api/telegram")
+def telegram_configure(req: TelegramConfigRequest):
+    pipeline.alerts.telegram.configure(
+        token=req.token, chat_id=req.chat_id, min_level=req.min_level)
+    return pipeline.alerts.telegram.status()
+
+
+@app.post("/api/telegram/test")
+def telegram_test():
+    return pipeline.alerts.telegram.send_test()
+
+
 # ------------------------------------------------------------------ video --
 @app.get("/video_feed")
 def video_feed():
