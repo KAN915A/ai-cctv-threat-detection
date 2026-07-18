@@ -62,12 +62,19 @@ alerts fire. Regression assets: `web/test_weapon.jpg`, `eval_video.py`,
 ## Browser demo
 
 Deployed on Vercel as a static site; the three ONNX models (~36 MB total,
-cached after first visit) load via CDN and run client-side (WebGPU when
-available, ~300 ms/frame).
+cached after first visit) load via CDN and run client-side — WebGPU when
+available (~300 ms/frame), multi-threaded WASM otherwise (the site is served
+with COOP/COEP headers, so cross-origin isolation enables WASM threads).
+
+The browser edition has its own Telegram card: paste a bot token and chat id
+(both stored only in that browser's localStorage) and alerts arrive on your
+phone with the snapshot photo. The full verdict-button loop remains a
+Python-edition feature. Alert snapshots can also be downloaded straight from
+the feed.
 
 ```bash
-# local preview
-python -m http.server 8090 --directory web
+# local preview (adds the cross-origin isolation headers for WASM threads)
+python web/server.py 8090
 ```
 
 ## Full edition (FastAPI dashboard)

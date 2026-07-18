@@ -106,6 +106,11 @@ async function fetchModel(name, onProgress) {
 async function loadModels() {
   const ph = $('placeholder');
   const providers = (navigator.gpu ? ['webgpu', 'wasm'] : ['wasm']);
+  // Multi-threaded WASM needs cross-origin isolation (COOP/COEP headers,
+  // served by web/server.py locally and vercel.json in production)
+  if (crossOriginIsolated) {
+    ort.env.wasm.numThreads = Math.min(4, navigator.hardwareConcurrency || 2);
+  }
   const opts = { executionProviders: providers };
   const progress = {};
   const report = () => {
@@ -127,7 +132,10 @@ async function loadModels() {
   ph.textContent = 'Models ready. Start the camera or try the sample image.';
   $('btnCam').disabled = false;
   $('btnSample').disabled = false;
-  $('perf').textContent = `backend: ${providers[0]}`;
+  const backend = navigator.gpu
+    ? 'webgpu'
+    : `wasm ×${crossOriginIsolated ? ort.env.wasm.numThreads : 1} threads`;
+  $('perf').textContent = `backend: ${backend}`;
 }
 
 // -------------------------------------------------------------- inference --
@@ -460,6 +468,7 @@ function fireAlerts(threats) {
     catch { /* quota exceeded — keep in-memory only */ }
 
     addAlertToFeed(alert, true);
+    tgSendAlert(alert);
     if (t.level === 'HIGH' || t.level === 'CRITICAL') beep(t.level === 'CRITICAL');
   }
 }
@@ -470,10 +479,14 @@ function addAlertToFeed(a, prepend) {
   if (emptyEl) emptyEl.remove();
   const el = document.createElement('div');
   el.className = 'alert-item';
+  const fname = `alert_${a.ts.replace(/[:T-]/g, '')}_${a.level}.jpg`;
   el.innerHTML = `
     <span class="badge ${a.level}">${a.level}</span>
     <div class="msg">${a.message}<div class="ts">${a.ts.replace('T', ' ')}</div></div>
-    ${a.snapshot ? `<img src="${a.snapshot}" title="alert snapshot">` : ''}`;
+    ${a.snapshot ? `<div style="display:flex;flex-direction:column;gap:3px;align-items:center">
+       <img src="${a.snapshot}" title="alert snapshot">
+       <a href="${a.snapshot}" download="${fname}"
+          style="font-size:11px;color:var(--muted)">⬇ save</a></div>` : ''}`;
   if (a.snapshot) el.querySelector('img').onclick = e => window.open(e.target.src);
   prepend ? feed.prepend(el) : feed.append(el);
   while (feed.children.length > 60) feed.lastChild.remove();
@@ -626,8 +639,102 @@ $('fileInput').onchange = async e => {
   await detectImage(img);
 };
 
+// --------------------------------------------------------------- telegram --
+// Browser-side Telegram alerts: the bot token and chat id live only in this
+// browser's localStorage and calls go straight to api.telegram.org — no
+// server involved. The full verdict-button loop lives in the Python edition.
+let tgCfg = { token: '', chat: '', min: 'HIGH' };
+try { Object.assign(tgCfg, JSON.parse(localStorage.getItem('tg_cfg') || '{}')); } catch {}
+
+function tgStatus(text, ok) {
+  const el = $('tgStatus');
+  el.textContent = text;
+  el.style.color = ok ? 'var(--ok)' : 'var(--muted)';
+}
+
+function tgRefreshUi() {
+  $('tgToken').value = tgCfg.token;
+  $('tgChat').value = tgCfg.chat;
+  $('tgLevel').value = tgCfg.min;
+  tgStatus(tgCfg.token && tgCfg.chat
+    ? `Configured — sends ${tgCfg.min}+ alerts with snapshots`
+    : (tgCfg.token ? 'Token saved — detect or enter your chat id'
+                   : 'Not configured'), !!(tgCfg.token && tgCfg.chat));
+}
+
+async function tgApi(method, body) {
+  const res = await fetch(
+    `https://api.telegram.org/bot${tgCfg.token}/${method}`,
+    { method: 'POST', body });
+  const data = await res.json();
+  if (!data.ok) throw new Error(data.description || 'Telegram error');
+  return data.result;
+}
+
+function dataUrlToBlob(dataUrl) {
+  const [head, b64] = dataUrl.split(',');
+  const mime = head.match(/data:(.*?);/)[1];
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type: mime });
+}
+
+function tgSendAlert(alert) {
+  if (!tgCfg.token || !tgCfg.chat) return;
+  if (LEVELS.indexOf(alert.level) < LEVELS.indexOf(tgCfg.min)) return;
+  try {
+    const form = new FormData();
+    form.append('chat_id', tgCfg.chat);
+    form.append('caption',
+      `${alert.level}: ${alert.message}\n${alert.ts.replace('T', ' ')}`);
+    form.append('photo', dataUrlToBlob(alert.snapshot), 'alert.jpg');
+    tgApi('sendPhoto', form)
+      .catch(e => tgStatus('Send failed: ' + e.message, false));
+  } catch (e) { console.error('telegram', e); }
+}
+
+$('tgSave').onclick = () => {
+  tgCfg = { token: $('tgToken').value.trim(), chat: $('tgChat').value.trim(),
+            min: $('tgLevel').value };
+  localStorage.setItem('tg_cfg', JSON.stringify(tgCfg));
+  tgRefreshUi();
+};
+
+$('tgDetect').onclick = async () => {
+  tgCfg.token = $('tgToken').value.trim();
+  if (!tgCfg.token) { tgStatus('Enter the bot token first', false); return; }
+  tgStatus('Looking for your chat…', false);
+  try {
+    const updates = await tgApi('getUpdates',
+      new URLSearchParams({ timeout: '0' }));
+    const msg = [...updates].reverse().find(u => u.message);
+    if (!msg) throw new Error(
+      'no messages — open your bot in Telegram, press Start, then retry');
+    $('tgChat').value = String(msg.message.chat.id);
+    $('tgSave').onclick();
+  } catch (e) { tgStatus('Detect failed: ' + e.message, false); }
+};
+
+$('tgTest').onclick = async () => {
+  tgCfg = { token: $('tgToken').value.trim(), chat: $('tgChat').value.trim(),
+            min: $('tgLevel').value };
+  if (!tgCfg.token || !tgCfg.chat) {
+    tgStatus('Need token and chat id first', false); return;
+  }
+  try {
+    const form = new FormData();
+    form.append('chat_id', tgCfg.chat);
+    form.append('text',
+      '🔔 Test from AI CCTV browser demo — alerts are working.');
+    await tgApi('sendMessage', form);
+    tgStatus('Test sent — check your Telegram', true);
+  } catch (e) { tgStatus('Test failed: ' + e.message, false); }
+};
+
 // ------------------------------------------------------------------- init --
 for (const a of alertHistory) addAlertToFeed(a, false);
+tgRefreshUi();
 loadModels().catch(e => {
   $('placeholder').textContent = 'Failed to load models: ' + e.message;
 });

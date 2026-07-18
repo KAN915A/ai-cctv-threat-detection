@@ -141,6 +141,34 @@
       <h2>Alert feed</h2>
       <div class="feed" id="feed"><div class="empty">No alerts yet.</div></div>
     </div>
+
+    <div class="card" style="margin-top:16px">
+      <h2>Telegram alerts</h2>
+      <div style="padding:12px 16px 16px;display:flex;flex-direction:column;gap:8px">
+        <div style="font-size:13px;color:var(--muted)" id="tgStatus">Not configured</div>
+        <input type="password" id="tgToken" placeholder="Bot token from @BotFather"
+               style="background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-size:13px;width:100%">
+        <div style="display:flex;gap:8px">
+          <input type="text" id="tgChat" placeholder="Chat id"
+                 style="background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-size:13px;flex:1;min-width:0">
+          <button id="tgDetect" title="Message your bot first, then click">Detect</button>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <select id="tgLevel" style="background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-size:13px">
+            <option value="MEDIUM">Send MEDIUM and above</option>
+            <option value="HIGH" selected>Send HIGH and above</option>
+            <option value="CRITICAL">Send CRITICAL only</option>
+          </select>
+          <button id="tgSave">Save</button>
+          <button id="tgTest">Test</button>
+        </div>
+        <div style="font-size:12px;color:var(--muted)">
+          Create a bot with <b>@BotFather</b>, paste the token, press Start in the
+          bot chat, then <b>Detect</b>. Alerts arrive with the snapshot photo.
+          The token is stored only in this browser.
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 
