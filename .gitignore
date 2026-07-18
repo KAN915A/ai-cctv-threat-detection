@@ -30,3 +30,6 @@ Weapons-and-Knives-Detector-with-YOLOv8-main/**
 !Weapons-and-Knives-Detector-with-YOLOv8-main/runs/detect/Normal/
 !Weapons-and-Knives-Detector-with-YOLOv8-main/runs/detect/Normal/weights/
 !Weapons-and-Knives-Detector-with-YOLOv8-main/runs/detect/Normal/weights/best.pt
+
+# Word lock files
+~$*
