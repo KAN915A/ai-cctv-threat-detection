@@ -1,0 +1,124 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI CCTV — Live Camera Test</title>
+<style>
+  :root {
+    --bg: #0b0d12; --panel: #141821; --panel2: #1a1f2b; --border: #262d3d;
+    --text: #e8eaf0; --muted: #8b93a7; --accent: #4c8bf5;
+    --low: #ffb40b; --medium: #ff7800; --high: #e6383c; --critical: #c832c8;
+    --ok: #3fb96a;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; padding: 14px 22px;
+           border-bottom: 1px solid var(--border); background: var(--panel); }
+  header h1 { font-size: 16px; font-weight: 650; }
+  header a { color: var(--accent); font-size: 13px; margin-left: auto; }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 16px; }
+  .banner { padding: 14px; border-radius: 10px; text-align: center; font-size: 17px;
+            font-weight: 700; letter-spacing: .05em; background: var(--panel2);
+            border: 1px solid var(--border); color: var(--muted); margin-bottom: 12px; }
+  .banner.LOW      { background: rgba(255,180,11,.14); border-color: var(--low); color: var(--low); }
+  .banner.MEDIUM   { background: rgba(255,120,0,.14);  border-color: var(--medium); color: var(--medium); }
+  .banner.HIGH     { background: rgba(230,56,60,.16);  border-color: var(--high); color: var(--high); }
+  .banner.CRITICAL { background: rgba(200,50,200,.18); border-color: var(--critical); color: var(--critical);
+                     animation: pulse 1s infinite; }
+  @keyframes pulse { 50% { opacity: .55; } }
+  .stage { background: #000; border: 1px solid var(--border); border-radius: 12px;
+           overflow: hidden; min-height: 260px; display: flex;
+           align-items: center; justify-content: center; }
+  .stage img { display: block; width: 100%; height: auto; }
+  .placeholder { color: var(--muted); padding: 60px 16px; text-align: center; }
+  .toolbar { display: flex; gap: 8px; margin-top: 12px; align-items: center; }
+  button { background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+           border-radius: 8px; padding: 10px 16px; font-size: 14px; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .4; cursor: default; }
+  .stat { color: var(--muted); font-size: 12px; margin-left: auto; }
+  .msgs { margin-top: 10px; color: var(--muted); font-size: 13px; }
+  video { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Live Camera Test — this device's camera, analyzed by the server</h1>
+  <a href="/">← dashboard</a>
+</header>
+<div class="wrap">
+  <div class="banner" id="banner">ALL CLEAR</div>
+  <div class="stage">
+    <div class="placeholder" id="placeholder">Press Start and allow camera access.<br>
+      <small>Frames are sent to your own server for detection — nothing leaves your network.</small></div>
+    <img id="view" hidden>
+  </div>
+  <div class="toolbar">
+    <button class="primary" id="btnStart">▶ Start</button>
+    <button id="btnStop" disabled>■ Stop</button>
+    <span class="stat" id="stat">–</span>
+  </div>
+  <div class="msgs" id="msgs"></div>
+</div>
+<video id="video" playsinline muted></video>
+
+<script>
+const $ = id => document.getElementById(id);
+const video = $('video');
+const cap = document.createElement('canvas');
+let ws = null, stream = null, running = false, busy = false;
+
+function stop() {
+  running = false;
+  if (ws) { ws.close(); ws = null; }
+  if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+  $('btnStart').disabled = false;
+  $('btnStop').disabled = true;
+}
+
+async function sendFrame() {
+  if (!running || busy || !ws || ws.readyState !== 1) return;
+  if (video.readyState < 2) return;
+  busy = true;
+  cap.width = video.videoWidth; cap.height = video.videoHeight;
+  cap.getContext('2d').drawImage(video, 0, 0);
+  const blob = await new Promise(r => cap.toBlob(r, 'image/jpeg', 0.7));
+  ws.send(await blob.arrayBuffer());
+}
+
+$('btnStart').onclick = async () => {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: 640, height: 480, facingMode: 'environment' } });
+  } catch (e) { $('msgs').textContent = 'Camera unavailable: ' + e.message; return; }
+  video.srcObject = stream;
+  await video.play();
+
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws/live`);
+  ws.onopen = () => { running = true; sendFrame(); };
+  ws.onclose = () => { if (running) stop(); };
+  ws.onmessage = e => {
+    busy = false;
+    const d = JSON.parse(e.data);
+    if (d.frame) {
+      $('view').src = 'data:image/jpeg;base64,' + d.frame;
+      $('view').hidden = false;
+      $('placeholder').hidden = true;
+    }
+    const b = $('banner');
+    b.className = 'banner' + (d.threat_level ? ' ' + d.threat_level : '');
+    b.textContent = d.threat_level ? 'THREAT: ' + d.threat_level : 'ALL CLEAR';
+    $('stat').textContent = `inference ${d.inference_ms} ms`;
+    $('msgs').textContent = (d.threats || []).map(t => t.message).join(' · ');
+    setTimeout(sendFrame, 60);
+  };
+  $('btnStart').disabled = true;
+  $('btnStop').disabled = false;
+};
+
+$('btnStop').onclick = stop;
+</script>
+</body>
+</html>

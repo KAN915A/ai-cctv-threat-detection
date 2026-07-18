@@ -16,10 +16,13 @@ from ultralytics import YOLO
 from .config import (
     DANGEROUS_OBJECTS,
     DISTRACTOR_CLASSES,
+    EXCLUDED_WEAPON_LABELS,
     GENERAL_MODEL_PATH,
+    HF_WEAPON_MODEL_URL,
     PACKAGE_CLASSES,
     PERSON_CLASSES,
     VEHICLE_CLASSES,
+    WEAPON_LABEL_MAP,
     WEAPON_MODEL_PATHS,
     settings,
 )
@@ -148,16 +151,39 @@ def fuse_weapons(
     return accepted
 
 
+def _ensure_hf_model(path: str) -> bool:
+    """Download the HF ensemble member on first run. Returns availability."""
+    from pathlib import Path
+    p = Path(path)
+    if p.exists():
+        return True
+    try:
+        import requests
+        print(f"Downloading weapons model from Hugging Face -> {p.name}")
+        r = requests.get(HF_WEAPON_MODEL_URL, timeout=120)
+        r.raise_for_status()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(r.content)
+        return True
+    except Exception as e:
+        print(f"HF model unavailable ({e}) — continuing without it")
+        return False
+
+
 class DetectionEngine:
     def __init__(self):
         print("Loading general model (people/vehicles)...")
         self.general = YOLO(GENERAL_MODEL_PATH)
         self.weapons = []
         for path in WEAPON_MODEL_PATHS:
-            print(f"Loading weapons model: {path}")
-            self.weapons.append(YOLO(path))
-        print(f"Weapons ensemble: {len(self.weapons)} models, "
-              f"classes {set(self.weapons[0].names.values())}")
+            if "threat-detection" in path and not _ensure_hf_model(path):
+                continue
+            try:
+                print(f"Loading weapons model: {path}")
+                self.weapons.append(YOLO(path))
+            except Exception as e:
+                print(f"Skipping weapons model {path}: {e}")
+        print(f"Weapons ensemble: {len(self.weapons)} models")
         self._weapon_turn = 0
         self._weapon_cache: dict[int, tuple[float, list[Detection]]] = {}
 
@@ -179,7 +205,10 @@ class DetectionEngine:
         for result in model(frame, conf=settings.weapon_candidate_conf,
                             verbose=False):
             for box in result.boxes:
-                label = model.names[int(box.cls[0])]
+                raw = model.names[int(box.cls[0])].lower()
+                if raw in EXCLUDED_WEAPON_LABELS:
+                    continue
+                label = WEAPON_LABEL_MAP.get(raw, raw)
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
                 candidates.append(Detection(
                     label=label, kind="weapon",

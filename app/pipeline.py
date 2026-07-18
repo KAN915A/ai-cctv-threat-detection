@@ -4,8 +4,13 @@ Runs in a background thread and shares the latest annotated JPEG + state
 snapshot with the web layer.
 """
 
+import os
 import threading
 import time
+
+# RTSP over TCP: UDP drops packets on WiFi and shows a frozen/black stream
+# even when the camera is fine. Must be set before OpenCV opens the stream.
+os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
 
 import cv2
 
@@ -38,6 +43,9 @@ class Pipeline:
         self.alerts = AlertEngine()
 
         self._lock = threading.Lock()
+        # Serializes model inference between the capture thread and the
+        # /ws/live browser-camera handler — YOLO calls aren't thread-safe
+        self.infer_lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self.running = False
         self.error: str | None = None
@@ -105,8 +113,9 @@ class Pipeline:
                 self.running = False
                 return
 
-            is_file = isinstance(self.source, str) and not str(
+            is_stream = isinstance(self.source, str) and str(
                 self.source).lower().startswith(("rtsp://", "http://", "https://"))
+            is_file = isinstance(self.source, str) and not is_stream
 
             last_frame_ts = time.time()
             while self.running:
@@ -116,6 +125,12 @@ class Pipeline:
                         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                         self.tracker = CentroidTracker()
                         continue
+                    if is_stream:  # network cameras hiccup — reconnect
+                        cap.release()
+                        time.sleep(2)
+                        cap = self._open_capture()
+                        if cap.isOpened():
+                            continue
                     self.error = "Video stream ended"
                     self.running = False
                     break
@@ -127,7 +142,8 @@ class Pipeline:
                     frame = cv2.resize(frame, (settings.inference_width,
                                                int(h * scale)))
 
-                detections, inference_ms = self.engine.detect(frame)
+                with self.infer_lock:
+                    detections, inference_ms = self.engine.detect(frame)
                 persons = [d for d in detections if d.kind == "person"]
                 tracks = self.tracker.update(persons)
                 threats = self.classifier.classify(detections, tracks,

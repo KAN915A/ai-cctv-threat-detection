@@ -12,7 +12,19 @@ _RUNS = BASE_DIR / "Weapons-and-Knives-Detector-with-YOLOv8-main" / "runs" / "de
 WEAPON_MODEL_PATHS = [
     str(_RUNS / "Normal" / "weights" / "best.pt"),
     str(_RUNS / "Normal_Compressed" / "weights" / "best.pt"),
+    # Third member: HF community model with Gun/knife/explosive classes.
+    # Auto-downloaded on first run (license unverified — not redistributed).
+    str(BASE_DIR / "models" / "threat-detection-yolov8n.pt"),
 ]
+HF_WEAPON_MODEL_URL = ("https://huggingface.co/Subh775/Threat-Detection-YOLOv8n/"
+                       "resolve/main/weights/best.pt")
+
+# Canonical weapon labels: the ensemble models disagree on naming
+# (guns/Gun, explosion/explosive) — normalize so cross-model agreement works
+WEAPON_LABEL_MAP = {
+    "guns": "gun", "gun": "gun", "knife": "knife", "explosion": "explosive",
+}
+EXCLUDED_WEAPON_LABELS = {"grenade"}   # misfires on faces per model's own docs
 
 # COCO-pretrained model for people / vehicles / bags (downloads on first run)
 GENERAL_MODEL_PATH = "yolov8n.pt"
@@ -81,6 +93,9 @@ class Settings:
 
     # Restricted zone as fractions of frame (x1, y1, x2, y2); None = disabled
     restricted_zone: tuple | None = None
+    # Person must stay in the zone this long before the alert fires —
+    # someone merely walking past shouldn't trip it
+    zone_dwell_seconds: float = 5.0
 
     # Night hours (for "unusual hours" context on alerts)
     night_start_hour: int = 22

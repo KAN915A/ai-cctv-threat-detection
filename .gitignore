@@ -16,6 +16,7 @@ test_clip.mp4
 # Auto-downloaded / re-exportable models at repo root
 yolov8n.pt
 yolov8n.onnx
+models/
 
 # Local tooling
 .claude/

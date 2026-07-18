@@ -151,18 +151,25 @@ class ThreatClassifier:
                 track.near_vehicle_since = None
 
         # --- Restricted zone (MEDIUM) ----------------------------------------
+        # Dwell-based: someone must STAY in the zone, not just walk past it
         if settings.restricted_zone is not None:
             h, w = frame_shape[:2]
             zx1, zy1, zx2, zy2 = settings.restricted_zone
             zone_px = (zx1 * w, zy1 * h, zx2 * w, zy2 * h)
-            for p in persons:
-                if _in_zone(p.box, zone_px):
-                    tid = f"#{p.track_id}" if p.track_id else ""
-                    threats.append(Threat(
-                        level="MEDIUM", kind="trespassing",
-                        message=f"Person {tid} inside restricted zone",
-                        box=p.box,
-                    ))
+            for track in tracks.values():
+                if _in_zone(track.box, zone_px):
+                    if track.zone_since is None:
+                        track.zone_since = now
+                    elif now - track.zone_since >= settings.zone_dwell_seconds:
+                        threats.append(Threat(
+                            level="MEDIUM", kind="trespassing",
+                            message=(f"Person #{track.track_id} inside "
+                                     f"restricted zone for "
+                                     f"{now - track.zone_since:.0f}s"),
+                            box=track.box,
+                        ))
+                else:
+                    track.zone_since = None
 
         # --- Loitering (LOW) --------------------------------------------------
         for track in tracks.values():

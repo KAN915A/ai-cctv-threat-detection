@@ -26,8 +26,10 @@ Every frame passes through **three YOLOv8 models**:
    context objects used for cross-checking.
 2. **Weapons ensemble** — the two strongest custom-trained guns/knife
    detectors from the training runs (Normal, mAP50 0.868 and
-   Normal_Compressed, mAP50 0.860). Same-label boxes that overlap across
-   models are merged and remember how many models agreed.
+   Normal_Compressed, mAP50 0.860), plus a third community model
+   (Subh775/Threat-Detection-YOLOv8n, auto-downloaded on first run) adding
+   gun/explosive coverage. Labels are normalized across models so
+   overlapping same-label boxes merge and remember how many models agreed.
 
 Raw weapons models false-positive heavily (laptop screens, pens, whole-room
 boxes), so every weapon candidate must survive a **fusion filter**:
@@ -86,7 +88,13 @@ python -m venv .venv
 ```
 
 Open http://localhost:8000 and enter a source: `0` (webcam), a video file
-path, or an `rtsp://` camera URL. Architecture and tuning knobs:
+path, or an `rtsp://` camera URL (RTSP runs over TCP and auto-reconnects on
+dropped streams). **Any phone can be a camera**: open
+`http://<server-ip>:8000/live` on the phone, press Start, and its browser
+camera is analyzed by the server — full ensemble, alerts, and Telegram
+included. Restricted-zone alerts require 5 s of dwell, so passers-by don't
+trip them. Telegram can also be configured headless via
+`TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` environment variables. Architecture and tuning knobs:
 [README_PROTOTYPE.md](README_PROTOTYPE.md); all thresholds live in
 `app/config.py`. The weapons ensemble is **interleaved** by default (one
 model per frame, round-robin, agreement checked across adjacent frames) for

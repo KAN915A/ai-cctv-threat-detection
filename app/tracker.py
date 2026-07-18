@@ -20,6 +20,7 @@ class Track:
     last_seen: float
     positions: list = field(default_factory=list)  # (t, x, y) history
     near_vehicle_since: float | None = None
+    zone_since: float | None = None
 
     @property
     def age(self) -> float:

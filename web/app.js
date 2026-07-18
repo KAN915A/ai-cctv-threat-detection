@@ -35,6 +35,7 @@ const DANGEROUS = new Set(['baseball bat', 'scissors']);
 const LOITER_SECONDS = 15;
 const LOITER_RADIUS = 90;            // px in model space
 const VEHICLE_LURK_SECONDS = 8;
+const ZONE_DWELL_SECONDS = 5;        // must stay in zone before alerting
 // Temporal vote: weapon must appear in >= WEAPON_VOTES of the last
 // WEAPON_WINDOW frames before HIGH fires (kills one-frame flickers)
 const WEAPON_WINDOW = 8;
@@ -416,12 +417,26 @@ function classify(dets, w, h, isStatic = false) {
     } else t.nearVehicleSince = null;
   }
 
+  // Dwell-based zone rule: someone must STAY in the zone (5 s), not just
+  // walk past it. Static images alert immediately (no dwell history).
   if ($('chkZone').checked) {
-    for (const p of persons) {
-      const cx = (p.x1 + p.x2) / 2;
-      if (cx >= 0.6 * w) {
-        threats.push({ level: 'MEDIUM', kind: 'trespassing',
-          message: `Person ${p.trackId ? '#' + p.trackId : ''} inside restricted zone` });
+    if (isStatic) {
+      for (const p of persons) {
+        if ((p.x1 + p.x2) / 2 >= 0.6 * w) {
+          threats.push({ level: 'MEDIUM', kind: 'trespassing',
+            message: `Person ${p.trackId ? '#' + p.trackId : ''} inside restricted zone` });
+        }
+      }
+    } else {
+      for (const t of tracks) {
+        const cx = (t.box.x1 + t.box.x2) / 2;
+        if (cx >= 0.6 * w) {
+          if (t.zoneSince == null) t.zoneSince = now;
+          else if (now - t.zoneSince >= ZONE_DWELL_SECONDS) {
+            threats.push({ level: 'MEDIUM', kind: 'trespassing',
+              message: `Person #${t.id} inside restricted zone for ${(now - t.zoneSince).toFixed(0)}s` });
+          }
+        } else t.zoneSince = null;
       }
     }
   }

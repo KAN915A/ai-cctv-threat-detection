@@ -5,15 +5,20 @@ Run with:
 """
 
 import asyncio
+import base64
 import time
 from pathlib import Path
 
+import cv2
+import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from .config import SNAPSHOT_DIR, settings
 from .pipeline import pipeline
+from .threat import ThreatClassifier, highest_level
+from .tracker import CentroidTracker
 
 app = FastAPI(title="AI CCTV Threat Detection — Prototype")
 
@@ -24,6 +29,13 @@ STATIC_DIR = Path(__file__).parent / "static"
 @app.get("/")
 def index():
     return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.get("/live")
+def live_page():
+    """Browser-camera live test: open on any phone/laptop on the network,
+    grant camera access, and its frames are analyzed by this server."""
+    return FileResponse(STATIC_DIR / "live.html")
 
 
 @app.get("/snapshots/{name}")
@@ -122,6 +134,50 @@ def video_feed():
 
 
 # -------------------------------------------------------------- websocket --
+@app.websocket("/ws/live")
+async def ws_live(websocket: WebSocket):
+    """Receives JPEG frames from a browser camera, runs the full pipeline
+    (detection ensemble, tracking, threat rules, alerts) and streams the
+    annotated result back. Each connection gets its own tracker/classifier;
+    the models and alert engine are shared with the main pipeline."""
+    await websocket.accept()
+    tracker = CentroidTracker()
+    classifier = ThreatClassifier()
+
+    def process(frame):
+        with pipeline.infer_lock:
+            detections, inference_ms = pipeline.engine.detect(frame)
+        persons = [d for d in detections if d.kind == "person"]
+        tracks = tracker.update(persons)
+        threats = classifier.classify(detections, tracks, frame.shape)
+        annotated = pipeline._annotate(frame.copy(), detections, threats)
+        pipeline.alerts.process(threats, annotated)
+        ok, buf = cv2.imencode(".jpg", annotated,
+                               [cv2.IMWRITE_JPEG_QUALITY, 75])
+        return {
+            "frame": base64.b64encode(buf.tobytes()).decode() if ok else None,
+            "threat_level": highest_level(threats),
+            "threats": [{"level": t.level, "kind": t.kind,
+                         "message": t.message} for t in threats],
+            "inference_ms": round(inference_ms, 1),
+        }
+
+    try:
+        while True:
+            data = await websocket.receive_bytes()
+            arr = np.frombuffer(data, dtype=np.uint8)
+            frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if frame is None:
+                continue
+            # Heavy CPU work off the event loop so other clients stay live
+            result = await asyncio.to_thread(process, frame)
+            await websocket.send_json(result)
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+
+
 @app.websocket("/ws")
 async def ws(websocket: WebSocket):
     await websocket.accept()

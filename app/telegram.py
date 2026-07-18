@@ -12,6 +12,7 @@ verdict on the event row, which doubles as labeled data for retraining.
 """
 
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -46,6 +47,10 @@ class TelegramNotifier:
             self.token = cfg.get("token") or None
             self.chat_id = cfg.get("chat_id") or None
             self.min_level = cfg.get("min_level") or "MEDIUM"
+        # Env-var fallback for headless deployments (no dashboard access)
+        self.token = self.token or os.environ.get("TELEGRAM_BOT_TOKEN") or None
+        self.chat_id = (self.chat_id
+                        or os.environ.get("TELEGRAM_CHAT_ID") or None)
         self._ensure_poller()
 
     def save(self):
